@@ -6,6 +6,7 @@ import { SettingsPanel } from "./components/SettingsPanel";
 import { createEmptyProfile, createUserMessage, fallbackSettings, historyKey } from "./constants/defaults";
 import { AiProfile, AppSettings, ChatMessage } from "./types/chat";
 import { createPendingMessages, normalizeSettings, toApiMessages } from "./utils/messages";
+import { buildOrchestrationStages, withStageInstruction } from "./utils/orchestration";
 
 export function App() {
   const [settings, setSettings] = useState<AppSettings>(fallbackSettings);
@@ -45,9 +46,13 @@ export function App() {
   }, [messages]);
 
   const activeProfiles = useMemo(
-    () => settings.aiProfiles.filter((profile) => activeIds.includes(profile.id)),
+    () =>
+      activeIds
+        .map((id) => settings.aiProfiles.find((profile) => profile.id === id))
+        .filter((profile): profile is AiProfile => Boolean(profile)),
     [activeIds, settings.aiProfiles],
   );
+  const orchestrationStages = useMemo(() => buildOrchestrationStages(activeProfiles), [activeProfiles]);
 
   const canSend = draft.trim().length > 0 && activeProfiles.length > 0 && !isSending;
 
@@ -99,12 +104,68 @@ export function App() {
     const userMessage = createUserMessage(draft.trim(), settings.userName);
     const profiles = activeProfiles;
     const baseMessages = [...messages, userMessage];
-    const pendingMessages = createPendingMessages(profiles);
+    const pendingMessages = createPendingMessages(profiles).map((message, index) => ({
+      ...message,
+      content:
+        settings.orchestrationMode === "dag"
+          ? `${orchestrationStages[index]?.title ?? profiles[index].name} 等待执行...`
+          : "思考中...",
+    }));
 
     setDraft("");
     setIsSending(true);
     setMessages([...baseMessages, ...pendingMessages]);
-    setStatus(profiles.length > 1 ? "群聊响应中" : "正在发送");
+    setStatus(settings.orchestrationMode === "dag" && profiles.length > 1 ? "DAG 编排执行中" : "正在发送");
+
+    if (settings.orchestrationMode === "dag") {
+      let nextMessages: ChatMessage[] = [...baseMessages, ...pendingMessages];
+      const completedReplies: ChatMessage[] = [];
+
+      for (let index = 0; index < orchestrationStages.length; index += 1) {
+        const stage = orchestrationStages[index];
+        const pending = pendingMessages[index];
+        setStatus(`${stage.title}: ${stage.profile.name} 执行中`);
+        nextMessages = nextMessages.map((message) =>
+          message.id === pending.id ? { ...message, content: `${stage.title} 正在处理...` } : message,
+        );
+        setMessages(nextMessages);
+
+        try {
+          const response = await invoke<{ content: string }>("send_chat", {
+            request: {
+              profile: withStageInstruction(stage.profile, stage),
+              messages: toApiMessages([...baseMessages, ...completedReplies], stage.profile),
+            },
+          });
+
+          const reply: ChatMessage = {
+            ...pending,
+            speakerName: `${stage.title} · ${stage.profile.name}`,
+            content: response.content,
+            pending: false,
+          };
+
+          completedReplies.push(reply);
+          nextMessages = nextMessages.map((message) => (message.id === pending.id ? reply : message));
+          setMessages(nextMessages);
+        } catch (error) {
+          const reply: ChatMessage = {
+            ...pending,
+            speakerName: `${stage.title} · ${stage.profile.name}`,
+            content: String(error),
+            pending: false,
+            error: true,
+          };
+          completedReplies.push(reply);
+          nextMessages = nextMessages.map((message) => (message.id === pending.id ? reply : message));
+          setMessages(nextMessages);
+        }
+      }
+
+      setIsSending(false);
+      setStatus("就绪");
+      return;
+    }
 
     const replies = await Promise.all(
       profiles.map(async (profile, index) => {
@@ -161,6 +222,27 @@ export function App() {
             </button>
           </div>
 
+          <div className="orchestration-bar">
+            <div>
+              <p className="eyebrow">Orchestration</p>
+              <strong>{settings.orchestrationMode === "dag" ? "DAG 编排" : "并行群聊"}</strong>
+            </div>
+            <div className="segmented">
+              <button
+                className={settings.orchestrationMode === "dag" ? "active" : ""}
+                onClick={() => void persist({ ...settings, orchestrationMode: "dag" })}
+              >
+                DAG
+              </button>
+              <button
+                className={settings.orchestrationMode === "parallel" ? "active" : ""}
+                onClick={() => void persist({ ...settings, orchestrationMode: "parallel" })}
+              >
+                并行
+              </button>
+            </div>
+          </div>
+
           <div className="agent-row">
             {settings.aiProfiles.map((profile) => (
               <button
@@ -174,11 +256,23 @@ export function App() {
             ))}
           </div>
 
+          {settings.orchestrationMode === "dag" && activeProfiles.length > 1 && (
+            <div className="dag-strip" aria-label="当前 DAG 编排">
+              {orchestrationStages.map((stage, index) => (
+                <div className="dag-node" key={stage.id}>
+                  <span>{stage.title}</span>
+                  <strong>{stage.profile.name}</strong>
+                  {index > 0 && <small>依赖上游节点</small>}
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="message-list">
             {messages.length === 0 ? (
               <div className="empty-state">
-                <h2>开始一次对话</h2>
-                <p>选择一个或多个 AI，填写 API Key 后发送消息。选中多个 AI 时会进入群聊。</p>
+                <h2>开始一次编排</h2>
+                <p>选择多个 AI 后发送问题。DAG 模式会按顺序完成简答、拓展和评价；并行模式会让所有 AI 同时回复。</p>
               </div>
             ) : (
               messages.map((message) => (
@@ -224,6 +318,7 @@ export function App() {
               settings={settings}
               onClear={() => setMessages([])}
               onChangeUserName={(userName) => void persist({ ...settings, userName })}
+              onChangeOrchestrationMode={(orchestrationMode) => void persist({ ...settings, orchestrationMode })}
             />
           )}
         </aside>

@@ -25,6 +25,8 @@ pub struct AiProfile {
 pub struct AppSettings {
     pub user_name: String,
     pub ai_profiles: Vec<AiProfile>,
+    #[serde(default = "default_orchestration_mode")]
+    pub orchestration_mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,7 +80,12 @@ fn default_settings() -> AppSettings {
             system_prompt: "你是一个简洁、可靠的 AI 助手。".to_string(),
             temperature: 0.7,
         }],
+        orchestration_mode: default_orchestration_mode(),
     }
+}
+
+fn default_orchestration_mode() -> String {
+    "dag".to_string()
 }
 
 #[tauri::command]

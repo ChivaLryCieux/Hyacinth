@@ -179,6 +179,44 @@ button:disabled {
   background: #f7f7f7;
 }
 
+.orchestration-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px;
+  border-bottom: 2px solid var(--line-strong);
+  background: var(--paper);
+}
+
+.orchestration-bar strong {
+  display: block;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.segmented {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(58px, 1fr));
+  border: 1px solid var(--line-strong);
+  background: var(--line-strong);
+  gap: 1px;
+}
+
+.segmented button {
+  min-height: 34px;
+  border-radius: 0;
+  color: var(--ink);
+  background: var(--paper);
+  font-weight: 900;
+}
+
+.segmented button.active {
+  color: #ffffff;
+  background: var(--accent);
+}
+
 .agent-chip {
   flex: 0 0 auto;
   display: inline-flex;
@@ -217,6 +255,53 @@ button:disabled {
   border-color: var(--accent);
   color: #ffffff;
   background: var(--accent);
+}
+
+.dag-strip {
+  flex: 0 0 auto;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(150px, 1fr);
+  gap: 18px;
+  padding: 10px;
+  overflow-x: auto;
+  border-bottom: 2px solid var(--line-strong);
+  background: #ffffff;
+}
+
+.dag-node {
+  position: relative;
+  min-height: 72px;
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 2px;
+  background: #f7f7f7;
+}
+
+.dag-node + .dag-node::before {
+  content: "";
+  position: absolute;
+  left: -18px;
+  top: 50%;
+  width: 18px;
+  border-top: 2px solid var(--line-strong);
+}
+
+.dag-node span,
+.dag-node small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.dag-node strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .message-list {
@@ -396,6 +481,7 @@ button:disabled {
 }
 
 .field input,
+.field select,
 .field textarea,
 .composer textarea {
   width: 100%;
@@ -408,6 +494,7 @@ button:disabled {
 }
 
 .field input:focus,
+.field select:focus,
 .field textarea:focus,
 .composer textarea:focus {
   border-color: var(--accent);

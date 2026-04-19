@@ -16,6 +16,7 @@ export const createEmptyProfile = (): AiProfile => ({
 export const fallbackSettings: AppSettings = {
   userName: "我",
   aiProfiles: [createEmptyProfile()],
+  orchestrationMode: "dag",
 };
 
 export const createUserMessage = (content: string, userName: string): ChatMessage => ({

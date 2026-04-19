@@ -1,11 +1,16 @@
-import { AppSettings, ApiMessage, ChatMessage, PendingMessage, AiProfile } from "../types/chat";
+import { AppSettings, ApiMessage, ChatMessage, PendingMessage, AiProfile, OrchestrationMode } from "../types/chat";
 import { fallbackSettings } from "../constants/defaults";
 
 export function normalizeSettings(settings: AppSettings): AppSettings {
-  if (settings.aiProfiles.length > 0) {
-    return settings;
-  }
-  return fallbackSettings;
+  const aiProfiles = settings.aiProfiles.length > 0 ? settings.aiProfiles : fallbackSettings.aiProfiles;
+  const orchestrationMode = normalizeOrchestrationMode(settings.orchestrationMode);
+
+  return {
+    ...fallbackSettings,
+    ...settings,
+    aiProfiles,
+    orchestrationMode,
+  };
 }
 
 export function toApiMessages(messages: ChatMessage[], target?: AiProfile): ApiMessage[] {
@@ -38,4 +43,8 @@ export function createPendingMessages(profiles: AiProfile[]): PendingMessage[] {
     avatar: profile.avatar,
     pending: true,
   }));
+}
+
+export function normalizeOrchestrationMode(mode: unknown): OrchestrationMode {
+  return mode === "parallel" || mode === "dag" ? mode : fallbackSettings.orchestrationMode;
 }

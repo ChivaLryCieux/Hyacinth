@@ -9,9 +9,12 @@ export type AiProfile = {
   temperature: number;
 };
 
+export type OrchestrationMode = "parallel" | "dag";
+
 export type AppSettings = {
   userName: string;
   aiProfiles: AiProfile[];
+  orchestrationMode: OrchestrationMode;
 };
 
 export type ChatRole = "user" | "assistant" | "system";
@@ -37,4 +40,13 @@ export type PendingMessage = ChatMessage & {
   role: "assistant";
   speakerId: string;
   pending: true;
+};
+
+export type OrchestrationStage = {
+  id: string;
+  title: string;
+  role: string;
+  instruction: string;
+  profile: AiProfile;
+  dependsOn: string[];
 };
