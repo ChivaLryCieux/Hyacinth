@@ -13,6 +13,7 @@ export function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [activeIds, setActiveIds] = useState<string[]>([]);
   const [activePanel, setActivePanel] = useState<"chat" | "agents" | "settings">("chat");
+  const [isSidePanelCollapsed, setIsSidePanelCollapsed] = useState(false);
   const [draft, setDraft] = useState("");
   const [status, setStatus] = useState("正在加载设置");
   const [isSending, setIsSending] = useState(false);
@@ -208,7 +209,39 @@ export function App() {
         <div className="status-pill">{status}</div>
       </header>
 
-      <main className="workspace">
+      <main className={`workspace ${isSidePanelCollapsed ? "side-panel-collapsed" : ""}`}>
+        <aside className={`side-panel ${activePanel === "chat" ? "" : "open"} ${isSidePanelCollapsed ? "collapsed" : ""}`}>
+          <button
+            className="panel-collapse-button"
+            type="button"
+            aria-label={isSidePanelCollapsed ? "展开 AI 管理栏" : "收起 AI 管理栏"}
+            aria-expanded={!isSidePanelCollapsed}
+            onClick={() => setIsSidePanelCollapsed((collapsed) => !collapsed)}
+          >
+            {isSidePanelCollapsed ? ">" : "<"}
+          </button>
+
+          {(activePanel === "agents" || activePanel === "chat") && (
+            <AgentPanel
+              profiles={settings.aiProfiles}
+              activeIds={activeIds}
+              onAdd={addProfile}
+              onRemove={removeProfile}
+              onToggle={toggleActive}
+              onUpdate={updateProfile}
+            />
+          )}
+
+          {activePanel === "settings" && (
+            <SettingsPanel
+              settings={settings}
+              onClear={() => setMessages([])}
+              onChangeUserName={(userName) => void persist({ ...settings, userName })}
+              onChangeOrchestrationMode={(orchestrationMode) => void persist({ ...settings, orchestrationMode })}
+            />
+          )}
+        </aside>
+
         <section className="chat-area" aria-label="聊天">
           <div className="mode-strip">
             <button className={activePanel === "chat" ? "active" : ""} onClick={() => setActivePanel("chat")}>
@@ -300,28 +333,6 @@ export function App() {
             <button disabled={!canSend}>发送</button>
           </form>
         </section>
-
-        <aside className={`side-panel ${activePanel === "chat" ? "" : "open"}`}>
-          {(activePanel === "agents" || activePanel === "chat") && (
-            <AgentPanel
-              profiles={settings.aiProfiles}
-              activeIds={activeIds}
-              onAdd={addProfile}
-              onRemove={removeProfile}
-              onToggle={toggleActive}
-              onUpdate={updateProfile}
-            />
-          )}
-
-          {activePanel === "settings" && (
-            <SettingsPanel
-              settings={settings}
-              onClear={() => setMessages([])}
-              onChangeUserName={(userName) => void persist({ ...settings, userName })}
-              onChangeOrchestrationMode={(orchestrationMode) => void persist({ ...settings, orchestrationMode })}
-            />
-          )}
-        </aside>
       </main>
     </div>
   );
