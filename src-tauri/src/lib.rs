@@ -147,7 +147,7 @@ async fn send_openai_compatible(
     request: ChatRequest,
 ) -> anyhow::Result<ChatResponse> {
     let profile = request.profile;
-    let endpoint = profile.endpoint.trim();
+    let endpoint = normalize_chat_endpoint(profile.endpoint.trim());
     if profile.api_key.trim().is_empty() {
         return Err(anyhow!("请先为 {} 填写 API Key", profile.name));
     }
@@ -185,7 +185,7 @@ async fn send_openai_compatible(
     }
 
     let response = client
-        .post(endpoint)
+        .post(&endpoint)
         .bearer_auth(profile.api_key.trim())
         .json(&json!({
             "model": profile.model.trim(),
@@ -221,6 +221,18 @@ async fn send_openai_compatible(
         .ok_or_else(|| anyhow!("AI 服务没有返回文本内容"))?;
 
     Ok(ChatResponse { content })
+}
+
+fn normalize_chat_endpoint(input: &str) -> String {
+    let endpoint = input.trim().trim_end_matches('/');
+    if endpoint.is_empty()
+        || endpoint.ends_with("/chat/completions")
+        || endpoint.ends_with("/responses")
+    {
+        return endpoint.to_string();
+    }
+
+    format!("{endpoint}/chat/completions")
 }
 
 fn extract_message_content(content: &Value) -> Option<String> {

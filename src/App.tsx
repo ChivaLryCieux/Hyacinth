@@ -26,7 +26,7 @@ export function App() {
         const normalized = normalizeSettings(loaded);
         setSettings(normalized);
         setActiveIds([normalized.aiProfiles[0].id]);
-        setStatus("就绪");
+        setStatus("您的智能体清醒着");
       })
       .catch((error) => {
         console.error(error);
@@ -211,7 +211,7 @@ export function App() {
       setMessages([...baseMessages, ...replies]);
     } finally {
       setIsSending(false);
-      setStatus("就绪");
+      setStatus("您的智能体清醒着");
     }
   }
 
@@ -220,7 +220,7 @@ export function App() {
       <header className="topbar">
         <div>
           <p className="eyebrow">Hyacinth</p>
-          <h1>AI 对话</h1>
+          <h1>WITH YOU</h1>
         </div>
         <div className="status-pill">{status}</div>
       </header>

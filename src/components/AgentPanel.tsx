@@ -53,7 +53,11 @@ export function AgentPanel({ profiles, activeIds, onAdd, onRemove, onToggle, onU
             />
           </label>
 
-          <Field label="API 地址" value={profile.endpoint} onChange={(endpoint) => onUpdate(profile.id, { endpoint })} />
+          <Field
+            label="API 地址或 Base URL"
+            value={profile.endpoint}
+            onChange={(endpoint) => onUpdate(profile.id, { endpoint })}
+          />
           <Field label="API Key" type="password" value={profile.apiKey} onChange={(apiKey) => onUpdate(profile.id, { apiKey })} />
           <Field label="模型" value={profile.model} onChange={(model) => onUpdate(profile.id, { model })} />
 
