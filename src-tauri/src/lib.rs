@@ -3,9 +3,14 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{fs, path::PathBuf, time::Duration};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, State};
 
 const SETTINGS_FILE: &str = "settings.json";
+const HTTP_TIMEOUT_SECS: u64 = 120;
+
+struct AppState {
+    http: Client,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,7 +60,17 @@ struct OpenAiChoice {
 
 #[derive(Debug, Deserialize)]
 struct OpenAiMessage {
-    content: Option<String>,
+    content: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiErrorResponse {
+    error: OpenAiError,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiError {
+    message: String,
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -102,24 +117,48 @@ fn load_settings(app: AppHandle) -> Result<AppSettings, String> {
 #[tauri::command]
 fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
     let path = settings_path(&app)?;
-    let text = serde_json::to_string_pretty(&settings).map_err(|err| format!("无法序列化设置: {err}"))?;
-    fs::write(path, text).map_err(|err| format!("无法保存设置: {err}"))
+    let text =
+        serde_json::to_string_pretty(&settings).map_err(|err| format!("无法序列化设置: {err}"))?;
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, text).map_err(|err| format!("无法保存设置: {err}"))?;
+    match fs::rename(&tmp_path, &path) {
+        Ok(()) => Ok(()),
+        Err(rename_err) if path.exists() => {
+            fs::remove_file(&path).map_err(|err| format!("无法替换旧设置文件: {err}"))?;
+            fs::rename(tmp_path, path)
+                .map_err(|err| format!("无法完成设置保存: {err}; 初次替换失败: {rename_err}"))
+        }
+        Err(err) => Err(format!("无法完成设置保存: {err}")),
+    }
 }
 
 #[tauri::command]
-async fn send_chat(request: ChatRequest) -> Result<ChatResponse, String> {
-    send_openai_compatible(request)
+async fn send_chat(
+    state: State<'_, AppState>,
+    request: ChatRequest,
+) -> Result<ChatResponse, String> {
+    send_openai_compatible(&state.http, request)
         .await
         .map_err(|err| err.to_string())
 }
 
-async fn send_openai_compatible(request: ChatRequest) -> anyhow::Result<ChatResponse> {
+async fn send_openai_compatible(
+    client: &Client,
+    request: ChatRequest,
+) -> anyhow::Result<ChatResponse> {
     let profile = request.profile;
+    let endpoint = profile.endpoint.trim();
     if profile.api_key.trim().is_empty() {
         return Err(anyhow!("请先为 {} 填写 API Key", profile.name));
     }
-    if profile.endpoint.trim().is_empty() {
+    if endpoint.is_empty() {
         return Err(anyhow!("请先为 {} 填写 API 地址", profile.name));
+    }
+    if !(endpoint.starts_with("https://") || endpoint.starts_with("http://")) {
+        return Err(anyhow!(
+            "{} 的 API 地址必须以 http:// 或 https:// 开头",
+            profile.name
+        ));
     }
     if profile.model.trim().is_empty() {
         return Err(anyhow!("请先为 {} 填写模型名称", profile.name));
@@ -141,14 +180,12 @@ async fn send_openai_compatible(request: ChatRequest) -> anyhow::Result<ChatResp
             "content": message.content,
         }));
     }
-
-    let client = Client::builder()
-        .timeout(Duration::from_secs(120))
-        .build()
-        .context("无法创建 HTTP 客户端")?;
+    if messages.is_empty() {
+        return Err(anyhow!("没有可发送的消息内容"));
+    }
 
     let response = client
-        .post(profile.endpoint.trim())
+        .post(endpoint)
         .bearer_auth(profile.api_key.trim())
         .json(&json!({
             "model": profile.model.trim(),
@@ -162,7 +199,10 @@ async fn send_openai_compatible(request: ChatRequest) -> anyhow::Result<ChatResp
     let status = response.status();
     let body = response.text().await.context("无法读取 AI 服务响应")?;
     if !status.is_success() {
-        return Err(anyhow!("AI 服务返回 {status}: {body}"));
+        return Err(anyhow!(
+            "AI 服务返回 {status}: {}",
+            readable_error_body(&body)
+        ));
     }
 
     let value: Value = serde_json::from_str(&body).context("AI 服务响应不是有效 JSON")?;
@@ -175,17 +215,63 @@ async fn send_openai_compatible(request: ChatRequest) -> anyhow::Result<ChatResp
     let choices = parsed.context("AI 服务响应 choices 格式不兼容")?;
     let content = choices
         .first()
-        .and_then(|choice| choice.message.content.clone())
+        .and_then(|choice| choice.message.content.as_ref())
+        .and_then(extract_message_content)
         .filter(|text| !text.trim().is_empty())
         .ok_or_else(|| anyhow!("AI 服务没有返回文本内容"))?;
 
     Ok(ChatResponse { content })
 }
 
+fn extract_message_content(content: &Value) -> Option<String> {
+    match content {
+        Value::String(text) => Some(text.to_string()),
+        Value::Array(parts) => {
+            let text = parts
+                .iter()
+                .filter_map(|part| {
+                    part.as_str()
+                        .map(str::to_string)
+                        .or_else(|| part.get("text").and_then(Value::as_str).map(str::to_string))
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            (!text.trim().is_empty()).then_some(text)
+        }
+        _ => None,
+    }
+}
+
+fn readable_error_body(body: &str) -> String {
+    if let Ok(parsed) = serde_json::from_str::<OpenAiErrorResponse>(body) {
+        return parsed.error.message;
+    }
+
+    const MAX_ERROR_LEN: usize = 800;
+    if body.chars().count() > MAX_ERROR_LEN {
+        format!(
+            "{}...",
+            body.chars().take(MAX_ERROR_LEN).collect::<String>()
+        )
+    } else {
+        body.to_string()
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let http = Client::builder()
+        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+        .build()
+        .expect("failed to create HTTP client");
+
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![load_settings, save_settings, send_chat])
+        .manage(AppState { http })
+        .invoke_handler(tauri::generate_handler![
+            load_settings,
+            save_settings,
+            send_chat
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Hyacinth");
 }

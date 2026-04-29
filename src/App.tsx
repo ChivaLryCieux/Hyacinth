@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AgentPanel } from "./components/AgentPanel";
 import { Avatar } from "./components/Avatar";
@@ -17,6 +17,8 @@ export function App() {
   const [draft, setDraft] = useState("");
   const [status, setStatus] = useState("正在加载设置");
   const [isSending, setIsSending] = useState(false);
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const saveVersionRef = useRef(0);
 
   useEffect(() => {
     invoke<AppSettings>("load_settings")
@@ -58,12 +60,25 @@ export function App() {
   const canSend = draft.trim().length > 0 && activeProfiles.length > 0 && !isSending;
 
   async function persist(nextSettings: AppSettings) {
+    const version = saveVersionRef.current + 1;
+    saveVersionRef.current = version;
     setSettings(nextSettings);
+
+    const write = saveQueueRef.current
+      .catch(() => undefined)
+      .then(() => invoke("save_settings", { settings: nextSettings }))
+      .then(() => undefined);
+    saveQueueRef.current = write.catch(() => undefined);
+
     try {
-      await invoke("save_settings", { settings: nextSettings });
-      setStatus("设置已保存");
+      await write;
+      if (version === saveVersionRef.current) {
+        setStatus("设置已保存");
+      }
     } catch (error) {
-      setStatus(String(error));
+      if (version === saveVersionRef.current) {
+        setStatus(String(error));
+      }
     }
   }
 
@@ -118,85 +133,86 @@ export function App() {
     setMessages([...baseMessages, ...pendingMessages]);
     setStatus(settings.orchestrationMode === "dag" && profiles.length > 1 ? "DAG 编排执行中" : "正在发送");
 
-    if (settings.orchestrationMode === "dag") {
-      let nextMessages: ChatMessage[] = [...baseMessages, ...pendingMessages];
-      const completedReplies: ChatMessage[] = [];
+    try {
+      if (settings.orchestrationMode === "dag") {
+        let nextMessages: ChatMessage[] = [...baseMessages, ...pendingMessages];
+        const completedReplies: ChatMessage[] = [];
 
-      for (let index = 0; index < orchestrationStages.length; index += 1) {
-        const stage = orchestrationStages[index];
-        const pending = pendingMessages[index];
-        setStatus(`${stage.title}: ${stage.profile.name} 执行中`);
-        nextMessages = nextMessages.map((message) =>
-          message.id === pending.id ? { ...message, content: `${stage.title} 正在处理...` } : message,
-        );
-        setMessages(nextMessages);
-
-        try {
-          const response = await invoke<{ content: string }>("send_chat", {
-            request: {
-              profile: withStageInstruction(stage.profile, stage),
-              messages: toApiMessages([...baseMessages, ...completedReplies], stage.profile),
-            },
-          });
-
-          const reply: ChatMessage = {
-            ...pending,
-            speakerName: `${stage.title} · ${stage.profile.name}`,
-            content: response.content,
-            pending: false,
-          };
-
-          completedReplies.push(reply);
-          nextMessages = nextMessages.map((message) => (message.id === pending.id ? reply : message));
+        for (let index = 0; index < orchestrationStages.length; index += 1) {
+          const stage = orchestrationStages[index];
+          const pending = pendingMessages[index];
+          setStatus(`${stage.title}: ${stage.profile.name} 执行中`);
+          nextMessages = nextMessages.map((message) =>
+            message.id === pending.id ? { ...message, content: `${stage.title} 正在处理...` } : message,
+          );
           setMessages(nextMessages);
-        } catch (error) {
-          const reply: ChatMessage = {
-            ...pending,
-            speakerName: `${stage.title} · ${stage.profile.name}`,
-            content: String(error),
-            pending: false,
-            error: true,
-          };
-          completedReplies.push(reply);
-          nextMessages = nextMessages.map((message) => (message.id === pending.id ? reply : message));
-          setMessages(nextMessages);
+
+          try {
+            const response = await invoke<{ content: string }>("send_chat", {
+              request: {
+                profile: withStageInstruction(stage.profile, stage),
+                messages: toApiMessages([...baseMessages, ...completedReplies], stage.profile),
+              },
+            });
+
+            const reply: ChatMessage = {
+              ...pending,
+              speakerName: `${stage.title} · ${stage.profile.name}`,
+              content: response.content,
+              pending: false,
+            };
+
+            completedReplies.push(reply);
+            nextMessages = nextMessages.map((message) => (message.id === pending.id ? reply : message));
+            setMessages(nextMessages);
+          } catch (error) {
+            const reply: ChatMessage = {
+              ...pending,
+              speakerName: `${stage.title} · ${stage.profile.name}`,
+              content: String(error),
+              pending: false,
+              error: true,
+            };
+            completedReplies.push(reply);
+            nextMessages = nextMessages.map((message) => (message.id === pending.id ? reply : message));
+            setMessages(nextMessages);
+          }
         }
+
+        return;
       }
 
+      const replies = await Promise.all(
+        profiles.map(async (profile, index) => {
+          try {
+            const response = await invoke<{ content: string }>("send_chat", {
+              request: {
+                profile,
+                messages: toApiMessages(baseMessages, profile),
+              },
+            });
+
+            return {
+              ...pendingMessages[index],
+              content: response.content,
+              pending: false,
+            };
+          } catch (error) {
+            return {
+              ...pendingMessages[index],
+              content: String(error),
+              pending: false,
+              error: true,
+            };
+          }
+        }),
+      );
+
+      setMessages([...baseMessages, ...replies]);
+    } finally {
       setIsSending(false);
       setStatus("就绪");
-      return;
     }
-
-    const replies = await Promise.all(
-      profiles.map(async (profile, index) => {
-        try {
-          const response = await invoke<{ content: string }>("send_chat", {
-            request: {
-              profile,
-              messages: toApiMessages(baseMessages, profile),
-            },
-          });
-
-          return {
-            ...pendingMessages[index],
-            content: response.content,
-            pending: false,
-          };
-        } catch (error) {
-          return {
-            ...pendingMessages[index],
-            content: String(error),
-            pending: false,
-            error: true,
-          };
-        }
-      }),
-    );
-
-    setMessages([...baseMessages, ...replies]);
-    setIsSending(false);
-    setStatus("就绪");
   }
 
   return (
