@@ -1,5 +1,6 @@
 import { AiProfile } from "../types/chat";
 import { Field } from "./Field";
+import { memo } from "react";
 
 type AgentPanelProps = {
   profiles: AiProfile[];
@@ -10,7 +11,7 @@ type AgentPanelProps = {
   onUpdate: (id: string, patch: Partial<AiProfile>) => void;
 };
 
-export function AgentPanel({ profiles, activeIds, onAdd, onRemove, onToggle, onUpdate }: AgentPanelProps) {
+const AgentPanelComponent = ({ profiles, activeIds, onAdd, onRemove, onToggle, onUpdate }: AgentPanelProps) => {
   return (
     <div className="panel-content">
       <div className="panel-head">
@@ -85,4 +86,38 @@ export function AgentPanel({ profiles, activeIds, onAdd, onRemove, onToggle, onU
       ))}
     </div>
   );
-}
+};
+
+export default memo(AgentPanelComponent, (prevProps, nextProps) => {
+  // Prevent unnecessary re-renders if profiles and activeIds haven't changed meaningfully
+  if (prevProps.profiles.length !== nextProps.profiles.length) return false;
+  
+  // Check if any profile has changed
+  for (let i = 0; i < prevProps.profiles.length; i++) {
+    if (prevProps.profiles[i] !== nextProps.profiles[i]) {
+      // Deep check for profile changes
+      const prevProfile = prevProps.profiles[i];
+      const nextProfile = nextProps.profiles[i];
+      if (
+        prevProfile.id !== nextProfile.id ||
+        prevProfile.name !== nextProfile.name ||
+        prevProfile.avatar !== nextProfile.avatar ||
+        prevProfile.endpoint !== nextProfile.endpoint ||
+        prevProfile.apiKey !== nextProfile.apiKey ||
+        prevProfile.model !== nextProfile.model ||
+        prevProfile.systemPrompt !== nextProfile.systemPrompt ||
+        prevProfile.temperature !== nextProfile.temperature
+      ) {
+        return false;
+      }
+    }
+  }
+  
+  // Check activeIds
+  if (prevProps.activeIds.length !== nextProps.activeIds.length) return false;
+  for (let i = 0; i < prevProps.activeIds.length; i++) {
+    if (prevProps.activeIds[i] !== nextProps.activeIds[i]) return false;
+  }
+  
+  return true;
+});
