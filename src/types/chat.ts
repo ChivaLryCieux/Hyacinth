@@ -30,12 +30,6 @@ export type ChatMessage = {
   error?: boolean;
 };
 
-export type ApiMessage = {
-  role: ChatRole;
-  content: string;
-  name?: string;
-};
-
 export type PendingMessage = ChatMessage & {
   role: "assistant";
   speakerId: string;
@@ -49,4 +43,14 @@ export type OrchestrationStage = {
   instruction: string;
   profile: AiProfile;
   dependsOn: string[];
+};
+
+/// Matches the Rust OrchestrationProgress struct.
+export type OrchestrationProgressEvent = {
+  stageId: string;
+  stageTitle: string;
+  profileName: string;
+  status: "running" | "completed" | "error";
+  content?: string;
+  messageId?: string;
 };

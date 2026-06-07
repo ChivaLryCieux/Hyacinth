@@ -1,15 +1,16 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import AgentPanel from "./components/AgentPanel";
 import { Avatar } from "./components/Avatar";
 import { SettingsPanel } from "./components/SettingsPanel";
-import { createEmptyProfile, createUserMessage, fallbackSettings, historyKey } from "./constants/defaults";
-import { AiProfile, AppSettings, ChatMessage } from "./types/chat";
-import { createPendingMessages, normalizeSettings, toApiMessages } from "./utils/messages";
-import { buildOrchestrationStages, withStageInstruction } from "./utils/orchestration";
+import { createUserMessage } from "./constants/defaults";
+import { AiProfile, AppSettings, ChatMessage, OrchestrationMode, OrchestrationStage } from "./types/chat";
+import { createPendingMessages } from "./utils/messages";
+import { OrchestrationProgressEvent } from "./types/chat";
 
 export function App() {
-  const [settings, setSettings] = useState<AppSettings>(fallbackSettings);
+  const [settings, setSettings] = useState<AppSettings | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [activeIds, setActiveIds] = useState<string[]>([]);
   const [activePanel, setActivePanel] = useState<"chat" | "agents" | "settings">("chat");
@@ -17,16 +18,16 @@ export function App() {
   const [draft, setDraft] = useState("");
   const [status, setStatus] = useState("正在加载设置");
   const [isSending, setIsSending] = useState(false);
-  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const saveVersionRef = useRef(0);
-  const saveTimeoutRef = useRef<any>(undefined);
+  const [orchestrationStages, setOrchestrationStages] = useState<OrchestrationStage[]>([]);
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  // ── Initialize: load settings and chat history from backend ──
 
   useEffect(() => {
     invoke<AppSettings>("load_settings")
       .then((loaded) => {
-        const normalized = normalizeSettings(loaded);
-        setSettings(normalized);
-        setActiveIds([normalized.aiProfiles[0].id]);
+        setSettings(loaded);
+        setActiveIds([loaded.aiProfiles[0].id]);
         setStatus("您的智能体清醒着");
       })
       .catch((error) => {
@@ -34,26 +35,27 @@ export function App() {
         setStatus(String(error));
       });
 
-    const cached = localStorage.getItem(historyKey);
-    if (!cached) return;
-
-    try {
-      const parsed: ChatMessage[] = JSON.parse(cached);
-      setMessages(parsed);
-    } catch {
-      localStorage.removeItem(historyKey);
-    }
+    invoke<ChatMessage[]>("load_history")
+      .then((cached) => {
+        if (cached.length > 0) setMessages(cached);
+      })
+      .catch(console.error);
   }, []);
 
+  // ── Persist chat history to backend (debounced) ──────────────
+
   useEffect(() => {
+    if (!settings) return;
     if (saveTimeoutRef.current !== undefined) {
       clearTimeout(saveTimeoutRef.current);
     }
     const timeoutId = setTimeout(() => {
-      localStorage.setItem(historyKey, JSON.stringify(messages));
+      if (messages.length > 0) {
+        invoke("save_history", { messages }).catch(console.error);
+      }
     }, 500);
     saveTimeoutRef.current = timeoutId;
-  }, [messages]);
+  }, [messages, settings]);
 
   useEffect(() => {
     return () => {
@@ -63,84 +65,63 @@ export function App() {
     };
   }, []);
 
+  // ── Fetch orchestration stages from backend ──────────────────
+
   useEffect(() => {
-    if (saveTimeoutRef.current !== null) {
-      clearTimeout(saveTimeoutRef.current);
+    if (activeProfiles.length === 0) {
+      setOrchestrationStages([]);
+      return;
     }
-    const timeoutId = setTimeout(() => {
-      localStorage.setItem(historyKey, JSON.stringify(messages));
-    }, 500);
-    saveTimeoutRef.current = timeoutId;
-  }, [messages]);
+    invoke<OrchestrationStage[]>("build_orchestration", { profiles: activeProfiles })
+      .then(setOrchestrationStages)
+      .catch(console.error);
+  }, [settings, activeIds]);
 
-  useEffect(() => {
-    return () => {
-      if (saveTimeoutRef.current !== null) {
-        clearTimeout(saveTimeoutRef.current);
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      clearTimeout(saveTimeoutRef.current);
-    };
-  }, []);
+  // ── Derived state ────────────────────────────────────────────
 
   const activeProfiles = useMemo(
     () =>
       activeIds
-        .map((id) => settings.aiProfiles.find((profile) => profile.id === id))
+        .map((id) => settings?.aiProfiles.find((profile) => profile.id === id))
         .filter((profile): profile is AiProfile => Boolean(profile)),
-    [activeIds, settings.aiProfiles],
+    [activeIds, settings],
   );
-  const orchestrationStages = useMemo(() => buildOrchestrationStages(activeProfiles), [activeProfiles]);
 
-  const canSend = draft.trim().length > 0 && activeProfiles.length > 0 && !isSending;
+  const canSend = draft.trim().length > 0 && activeProfiles.length > 0 && !isSending && settings !== null;
+
+  // ── Settings persistence ─────────────────────────────────────
 
   async function persist(nextSettings: AppSettings) {
-    const version = saveVersionRef.current + 1;
-    saveVersionRef.current = version;
     setSettings(nextSettings);
-
-    const write = saveQueueRef.current
-      .catch(() => undefined)
-      .then(() => invoke("save_settings", { settings: nextSettings }))
-      .then(() => undefined);
-    saveQueueRef.current = write.catch(() => undefined);
-
     try {
-      await write;
-      if (version === saveVersionRef.current) {
-        setStatus("设置已保存");
-      }
+      await invoke("save_settings", { settings: nextSettings });
+      setStatus("设置已保存");
     } catch (error) {
-      if (version === saveVersionRef.current) {
-        setStatus(String(error));
-      }
+      setStatus(String(error));
     }
   }
 
   function updateProfile(id: string, patch: Partial<AiProfile>) {
-    const nextSettings = {
+    if (!settings) return;
+    void persist({
       ...settings,
       aiProfiles: settings.aiProfiles.map((profile) => (profile.id === id ? { ...profile, ...patch } : profile)),
-    };
-    void persist(nextSettings);
+    });
   }
 
-  function addProfile() {
-    const profile = createEmptyProfile();
+  async function addProfile() {
+    if (!settings) return;
+    const profile = await invoke<AiProfile>("create_profile");
     void persist({ ...settings, aiProfiles: [...settings.aiProfiles, profile] });
     setActiveIds((ids) => [...ids, profile.id]);
   }
 
   function removeProfile(id: string) {
+    if (!settings) return;
     if (settings.aiProfiles.length <= 1) {
       setStatus("至少保留一个 AI");
       return;
     }
-
     void persist({
       ...settings,
       aiProfiles: settings.aiProfiles.filter((profile) => profile.id !== id),
@@ -152,113 +133,104 @@ export function App() {
     setActiveIds((ids) => (ids.includes(id) ? ids.filter((item) => item !== id) : [...ids, id]));
   }
 
+  // ── Send message — delegates all orchestration to backend ────
+
   async function sendMessage(event: FormEvent) {
     event.preventDefault();
-    if (!canSend) return;
+    if (!canSend || !settings) return;
 
     const userMessage = createUserMessage(draft.trim(), settings.userName);
-    const profiles = activeProfiles;
     const baseMessages = [...messages, userMessage];
-    const pendingMessages = createPendingMessages(profiles).map((message, index) => ({
+    const pendingMessages = createPendingMessages(activeProfiles).map((message, index) => ({
       ...message,
       content:
         settings.orchestrationMode === "dag"
-          ? `${orchestrationStages[index]?.title ?? profiles[index].name} 等待执行...`
+          ? `${orchestrationStages[index]?.title ?? activeProfiles[index].name} 等待执行...`
           : "思考中...",
     }));
 
     setDraft("");
     setIsSending(true);
     setMessages([...baseMessages, ...pendingMessages]);
-    setStatus(settings.orchestrationMode === "dag" && profiles.length > 1 ? "DAG 编排执行中" : "正在发送");
+    setStatus(settings.orchestrationMode === "dag" && activeProfiles.length > 1 ? "DAG 编排执行中" : "正在发送");
 
-     try {
-       if (settings.orchestrationMode === "dag") {
-         let nextMessages: ChatMessage[] = [...baseMessages, ...pendingMessages];
-         const completedReplies: ChatMessage[] = [];
+    // Map stage.id → pending message id for progress event matching
+    const stageToPending = new Map<string, string>();
+    orchestrationStages.forEach((stage, index) => {
+      if (pendingMessages[index]) {
+        stageToPending.set(stage.id, pendingMessages[index].id);
+      }
+    });
 
-         // Precompute base messages once to avoid spreading in each iteration
-         const baseMessagesSnapshot = [...baseMessages];
+    try {
+      // Listen for progress events (DAG mode emits these per stage)
+      const unlisten = await listen<OrchestrationProgressEvent>("orchestration-progress", (event) => {
+        const { stageId, stageTitle, profileName, status: eventStatus, content } = event.payload;
+        const pendingId = stageToPending.get(stageId);
 
-         for (let index = 0; index < orchestrationStages.length; index += 1) {
-           const stage = orchestrationStages[index];
-           const pending = pendingMessages[index];
-           setStatus(`${stage.title}: ${stage.profile.name} 执行中`);
-           
-           // Update pending status
-           nextMessages = nextMessages.map((message) =>
-             message.id === pending.id ? { ...message, content: `${stage.title} 正在处理...` } : message,
-           );
-           setMessages(nextMessages);
-
-           try {
-             // Use snapshot of base messages plus completed replies
-             const response = await invoke<{ content: string }>("send_chat", {
-               request: {
-                 profile: withStageInstruction(stage.profile, stage),
-                 messages: toApiMessages([...baseMessagesSnapshot, ...completedReplies], stage.profile),
-               },
-             });
-
-             const reply: ChatMessage = {
-               ...pending,
-               speakerName: `${stage.title} · ${stage.profile.name}`,
-               content: response.content,
-               pending: false,
-             };
-
-             completedReplies.push(reply);
-             nextMessages = nextMessages.map((message) => (message.id === pending.id ? reply : message));
-             setMessages(nextMessages);
-           } catch (error) {
-             const reply: ChatMessage = {
-               ...pending,
-               speakerName: `${stage.title} · ${stage.profile.name}`,
-               content: String(error),
-               pending: false,
-               error: true,
-             };
-             completedReplies.push(reply);
-             nextMessages = nextMessages.map((message) => (message.id === pending.id ? reply : message));
-             setMessages(nextMessages);
-           }
-         }
-
-         return;
-       }
-
-      const replies = await Promise.all(
-        profiles.map(async (profile, index) => {
-          try {
-            const response = await invoke<{ content: string }>("send_chat", {
-              request: {
-                profile,
-                messages: toApiMessages(baseMessages, profile),
-              },
-            });
-
-            return {
-              ...pendingMessages[index],
-              content: response.content,
-              pending: false,
-            };
-          } catch (error) {
-            return {
-              ...pendingMessages[index],
-              content: String(error),
-              pending: false,
-              error: true,
-            };
+        if (eventStatus === "running") {
+          setStatus(`${stageTitle}: ${profileName} 执行中`);
+          if (pendingId) {
+            setMessages((prev) =>
+              prev.map((msg) => (msg.id === pendingId ? { ...msg, content: `${stageTitle} 正在处理...` } : msg)),
+            );
           }
-        }),
-      );
+        }
+      });
 
-      setMessages([...baseMessages, ...replies]);
+      const finalMessages = await invoke<ChatMessage[]>("execute_orchestration", {
+        request: {
+          profiles: activeProfiles,
+          messages: baseMessages,
+          mode: settings.orchestrationMode,
+        },
+      });
+
+      unlisten();
+
+      // Replace pending messages with final results
+      setMessages([...baseMessages, ...finalMessages]);
+    } catch (error) {
+      // Mark all pending messages as errors
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.pending ? { ...msg, content: String(error), pending: false, error: true } : msg,
+        ),
+      );
     } finally {
       setIsSending(false);
       setStatus("您的智能体清醒着");
     }
   }
+
+  // ── Clear history ────────────────────────────────────────────
+
+  async function handleClearHistory() {
+    setMessages([]);
+    try {
+      await invoke("clear_history");
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  // ── Guard: don't render until settings are loaded ────────────
+
+  if (!settings) {
+    return (
+      <div className="app-shell">
+        <header className="topbar">
+          <div>
+            <p className="eyebrow">Hyacinth</p>
+            <h1>WITH YOU</h1>
+          </div>
+          <div className="status-pill">{status}</div>
+        </header>
+      </div>
+    );
+  }
+
+  // ── Render ───────────────────────────────────────────────────
 
   return (
     <div className="app-shell">
@@ -296,9 +268,11 @@ export function App() {
           {activePanel === "settings" && (
             <SettingsPanel
               settings={settings}
-              onClear={() => setMessages([])}
+              onClear={handleClearHistory}
               onChangeUserName={(userName) => void persist({ ...settings, userName })}
-              onChangeOrchestrationMode={(orchestrationMode) => void persist({ ...settings, orchestrationMode })}
+              onChangeOrchestrationMode={(orchestrationMode) =>
+                void persist({ ...settings, orchestrationMode: orchestrationMode as OrchestrationMode })
+              }
             />
           )}
         </aside>
